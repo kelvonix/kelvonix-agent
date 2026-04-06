@@ -6,6 +6,10 @@ REPO="kelvonix/kelvonix-agent"
 BINARY_NAME="kelvonix-agent"
 INSTALL_PATH="/usr/local/bin/$BINARY_NAME"
 
+# Detect the real user if run with sudo
+REAL_USER=${SUDO_USER:-$USER}
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+
 # --- Argument Parsing ---
 TOKEN=""
 SERVER=""
@@ -36,7 +40,7 @@ if [ -z "$DOWNLOAD_URL" ]; then
     exit 1
 fi
 
-echo "⬇️ Downloading asset from $DOWNLOAD_URL..."
+echo "⬇️ Downloading asset..."
 curl -L "$DOWNLOAD_URL" -o "${BINARY_NAME}.tar.gz"
 
 echo "📦 Extracting..."
@@ -45,12 +49,12 @@ chmod +x "$BINARY_NAME"
 
 echo "🔧 Installing to $INSTALL_PATH..."
 sudo mv "$BINARY_NAME" "$INSTALL_PATH"
-# Clean up archive
 rm "${BINARY_NAME}.tar.gz"
 
-# --- 2. Registration ---
-echo "🔑 Registering agent..."
-sudo "$INSTALL_PATH" register --token "$TOKEN" --server "$SERVER"
+# --- 2. Registration (Run as the REAL user) ---
+echo "🔑 Registering agent as user '$REAL_USER'..."
+# This ensures the identity.json lands in /home/user/.kelvonix/ and not /root/
+sudo -u "$REAL_USER" "$INSTALL_PATH" register --token "$TOKEN" --server "$SERVER"
 
 # --- 3. Create Systemd Service ---
 echo "⚙️ Creating systemd service..."
@@ -61,6 +65,9 @@ After=network.target
 
 [Service]
 Type=simple
+User=$REAL_USER
+Group=$REAL_USER
+Environment=HOME=$REAL_HOME
 ExecStart=$INSTALL_PATH
 Restart=always
 RestartSec=5
@@ -69,10 +76,17 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# --- 4. Start Service ---
+# --- 4. Start and Verify Service ---
 echo "🚀 Starting service..."
 sudo systemctl daemon-reload
 sudo systemctl enable kelvonix-agent
-sudo systemctl start kelvonix-agent
+sudo systemctl restart kelvonix-agent
 
-echo "✅ Successfully installed, registered, and started Kelvonix Agent!"
+# Wait a moment to check health
+sleep 2
+if systemctl is-active --quiet kelvonix-agent; then
+    echo "✅ Successfully installed, registered, and started Kelvonix Agent!"
+else
+    echo "❌ Service started but crashed. Check: journalctl -u kelvonix-agent"
+    exit 1
+fi
